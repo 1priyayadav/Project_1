@@ -29,7 +29,6 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-
 # Install cuDNN
 COPY cudnn-local-repo-ubuntu2204-8.9.7.29_1.0-1_amd64.deb /tmp
 RUN dpkg -i /tmp/cudnn-local-repo-ubuntu2204-8.9.7.29_1.0-1_amd64.deb 
@@ -39,7 +38,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && rm /tmp/cudnn-local-repo-ubuntu2204-8.9.7.29_1.0-1_amd64.deb
 
-# Clone and build OpenCV from source
+# Build OpenCV with CUDA
 RUN git clone https://github.com/opencv/opencv.git \
     && git clone https://github.com/opencv/opencv_contrib.git \
     && cd opencv \
@@ -66,7 +65,7 @@ RUN git clone https://github.com/opencv/opencv.git \
     && cd ../../ \
     && rm -rf opencv opencv_contrib
 
-# Clone and build dlib from source with CUDA support
+# Build dlib with CUDA
 RUN git clone https://github.com/davisking/dlib.git \
     && cd dlib \
     && mkdir build \
@@ -79,6 +78,7 @@ RUN git clone https://github.com/davisking/dlib.git \
     && rm -rf dlib
 
 RUN pip install face-recognition
+
 COPY . .
 
 RUN chmod +x start.sh
@@ -86,4 +86,5 @@ RUN chmod +x start.sh
 EXPOSE 8000
 ENV PYTHONUNBUFFERED 1
 
+# Default command (start.sh), but allow overriding for testing __main__.py
 CMD ["./start.sh"]

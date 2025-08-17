@@ -14,6 +14,8 @@ from recognizeapp.utils import (
     dedupe_images,
     encode_faces,
     generate_report,
+    check_liveness,
+    check_deepfake,
 )
 
 WORKERS = 16
@@ -38,12 +40,27 @@ def encode_chunk(
     config: Dict[str, Any],
     pre_encodings: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Encode faces in a chunk of files."""
+    """Encode faces in a chunk of files with liveness & deepfake check."""
     ds = Dataset(config)
     size = len(files)
     callback = partial(notify_status, task=self, size=size)
 
-    return encode_faces(files, ds.get_encoding_config(), pre_encodings, progress=callback)
+    encodings = encode_faces(files, ds.get_encoding_config(), pre_encodings, progress=callback)
+
+    # Run liveness + deepfake check for each face
+    enhanced_encodings = {}
+    for fpath, data in encodings.items():
+        face_img = data.get("image")
+        liveness_score = check_liveness(face_img)
+        deepfake_score = check_deepfake(face_img)
+
+        enhanced_encodings[fpath] = {
+            **data,
+            "liveness": liveness_score,
+            "deepfake": deepfake_score,
+        }
+
+    return enhanced_encodings
 
 
 @app.task(bind=True)
@@ -71,7 +88,6 @@ def dedupe_chunk(
 @app.task(bind=True)
 def get_findings(self: Task, results: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]:
     """Aggregate and save findings."""
-    # Extract only the first element (dictionary) from each tuple in results
     dictionaries = [result[0] for result in results if isinstance(result, tuple) and isinstance(result[0], dict)]
     ds = Dataset(config)
     findings = dict(ChainMap(*dictionaries))
@@ -126,7 +142,7 @@ def get_encodings(self: Task, results: List[Dict[str, Any]], config: Dict[str, A
 
 @app.task(bind=True)
 def save_report(self: Task, config: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate and save a report."""
+    """Generate and save a report with liveness & deepfake info."""
     ds = Dataset(config)
     content = generate_report(ds.path, ds.get_findings(), ds.get_perf())
     report_file = Path(ds._get_filename("_report", ".html"))
@@ -150,7 +166,7 @@ def deduplicate_dataset(self: Task, config: Dict[str, Any]) -> Dict[str, Any]:
     existing_findings = ds.get_findings()
 
     now = datetime.now()
-    # config["sys"]["dedupe_start_time"] = int(round(now.timestamp()))
+    config["sys"]["dedupe_start_time"] = int(round(now.timestamp()))
     chunks = get_chunks(list(encoded.keys()))
     size = len(chunks)
 
@@ -161,7 +177,7 @@ def deduplicate_dataset(self: Task, config: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.task(bind=True)
 def process_dataset(self: Task, config: Dict[str, Any]) -> Dict[str, Any]:
-    """Process the dataset for encoding and deduplication."""
+    """Process the dataset for encoding and deduplication with liveness/deepfake checks."""
     now = datetime.now()
     config["sys"] = {"encode_start_time": int(round(now.timestamp()))}
 

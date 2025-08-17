@@ -1,0 +1,39 @@
+version: '3.8'
+services:
+  web:
+    build: .
+    command: ./start.sh
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+    volumes:
+      - .:/usr/src/app
+      - /home/stock/Documents/UNICEF/test 100/:/usr/src/app/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - db
+    environment:
+      - DATABASE_URL=postgres://user:password@db:5432/dbname
+      - MEDIA_FILES=/usr/src/app/media
+      - CELERY_BROKER_URL=redis://redis:6379/0 
+  db:
+    image: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_USER: user
+      POSTGRES_DB: dbname
+  redis:
+    restart: always
+    image: redis
+    expose:
+      - "6379"
+
+volumes:
+  postgres_data:

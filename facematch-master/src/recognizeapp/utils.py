@@ -6,12 +6,18 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+import cv2
+import numpy as np
+import torch
 from deepface import DeepFace
 from jinja2 import Template
 
 NO_FACE_DETECTED = "NO_FACE_DETECTED"
 
 
+# -----------------------------
+# Dataset Class (unchanged)
+# -----------------------------
 class Dataset:
     """
     A class to manage dataset-related operations, such as encoding and deduplication.
@@ -34,90 +40,77 @@ class Dataset:
 
     @cached_property
     def encoding_db_name(self) -> Path:
-        """Return the file name for the encoding database."""
         return self._get_filename("encoding")
 
     @cached_property
     def findings_db_name(self) -> Path:
-        """Return the file name for the findings database."""
         return self._get_filename("findings")
 
     @cached_property
     def silenced_db_name(self) -> Path:
-        """Return the file name for the silenced database."""
         return self._get_filename("silenced")
 
     @cached_property
     def runinfo_db_name(self) -> Path:
-        """Return the file name for performance metrics."""
         return self._get_filename("perf")
 
     def reset(self) -> None:
-        """Delete all related database files to reset the dataset."""
         self.storage(self.encoding_db_name).unlink(missing_ok=True)
         self.storage(self.findings_db_name).unlink(missing_ok=True)
         self.storage(self.silenced_db_name).unlink(missing_ok=True)
 
     def get_encoding(self) -> Dict[Path, Union[str, List[float]]]:
-        """Load the encodings from the encoding database file."""
         if self.storage(self.encoding_db_name).exists():
             return json.loads(self.storage(self.encoding_db_name).read_text())
         return {}
 
     def get_findings(self) -> Dict[Path, Any]:
-        """Load the findings from the findings database file."""
         if self.storage(self.findings_db_name).exists():
             return json.loads(self.storage(self.findings_db_name).read_text())
         return {}
 
     def get_perf(self) -> Dict[Path, Any]:
-        """Load performance metrics from the performance database file."""
         if self.storage(self.runinfo_db_name).exists():
             return json.loads(self.storage(self.runinfo_db_name).read_text())
         return {}
 
     def get_silenced(self) -> Dict[Path, Any]:
-        """Load the silenced findings from the silenced database file."""
         if self.storage(self.silenced_db_name).exists():
             return json.loads(self.storage(self.silenced_db_name).read_text())
         return {}
 
     def get_files(self) -> List[str]:
-        """Retrieve all valid image files from the dataset directory."""
         patterns = ("*.png", "*.jpg", "*.jpeg")
         return [str(f.absolute()) for f in self.storage(self.path).iterdir() if any(f.match(p) for p in patterns)]
 
     def update_findings(self, findings: Dict[str, Any]) -> Path:
-        """Update the findings database with new findings."""
         self.storage(self.findings_db_name).write_text(json.dumps(findings))
         return self.findings_db_name
 
     def update_encodings(self, encodings: Dict[str, Any]) -> Path:
-        """Update the encoding database with new encodings."""
         self.storage(self.encoding_db_name).write_text(json.dumps(encodings))
         return self.encoding_db_name
 
     def save_run_info(self, info: Dict[str, Any]) -> None:
-        """Save performance metrics to the performance database."""
         self.storage(self.runinfo_db_name).write_text(json.dumps(info))
 
     def get_encoding_config(self) -> Dict[str, Union[str, int, float, bool]]:
-        """Retrieve encoding configuration options."""
         return {
             "model_name": self.options["model_name"],
             "detector_backend": self.options["detector_backend"],
         }
 
     def get_dedupe_config(self) -> Dict[str, Union[str, int, float, bool]]:
-        """Retrieve deduplication configuration options."""
         return {
             "model_name": self.options["model_name"],
             "detector_backend": self.options["detector_backend"],
         }
 
 
+# -----------------------------
+# Helper functions
+# -----------------------------
 def chop_microseconds(delta: datetime.timedelta) -> datetime.timedelta:
-    """Remove microseconds from a timedelta."""
     return delta - datetime.timedelta(microseconds=delta.microseconds)
 
 
@@ -164,7 +157,6 @@ def dedupe_images(
     pre_findings: Optional[Dict[str, Any]] = None,
     progress: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, List[Union[str, float]]]:
-    """Find duplicate images based on face encodings."""
     if not callable(progress):
         progress = lambda *a: None
     findings: defaultdict = defaultdict(list)
@@ -173,11 +165,9 @@ def dedupe_images(
     for n, file1 in enumerate(files):
         progress(n, file1)
         enc1 = encodings[file1]
-        # Skip if the encoding is NO_FACE_DETECTED or not a list of floats
         if enc1 == NO_FACE_DETECTED:
             findings[file1].append([NO_FACE_DETECTED, 99])
             continue
-        # Skip if comparing the same file or enc2 is not valid
         for file2, enc2 in encodings.items():
             if file1 == file2:
                 continue
@@ -199,8 +189,6 @@ def generate_report(
     report_file: Path,
     save_to_file: bool = True,
 ) -> None:
-    """Generate an HTML report from findings and metrics."""
-
     def _resolve(p: Union[Path, str]) -> Union[Path, str]:
         if p == NO_FACE_DETECTED:
             return NO_FACE_DETECTED
@@ -223,3 +211,57 @@ def generate_report(
 
 def distance_to_similarity(distance):
     return 1 - distance
+
+
+# -----------------------------
+# Anti-spoofing (Liveness) Check
+# -----------------------------
+def check_liveness(image_path: str, model_path: str = "resources/anti_spoof_models") -> bool:
+    """
+    Perform liveness check using Silent-Face Anti-Spoofing.
+    Returns True if the face is real/live, False if spoofed.
+    """
+    from silent_face import AntiSpoofPredict
+
+    model = AntiSpoofPredict(model_path)
+    image = cv2.imread(image_path)
+    if image is None:
+        return False
+
+    # Run prediction
+    prediction = model.predict(image)
+    label = np.argmax(prediction)
+    return label == 1  # 1 = real, 0 = spoof
+
+
+# -----------------------------
+# Deepfake Detector
+# -----------------------------
+class DeepFakeDetector(torch.nn.Module):
+    """
+    A simple pretrained CNN model for deepfake detection.
+    Replace with a stronger model if needed.
+    """
+
+    def __init__(self, model_path="resources/deepfake_detector.pth"):
+        super().__init__()
+        self.model = torch.load(model_path, map_location="cpu")
+        self.model.eval()
+
+    def predict(self, image_path: str) -> bool:
+        """
+        Predict if the image is deepfake.
+        Returns True if fake, False if real.
+        """
+        image = cv2.imread(image_path)
+        if image is None:
+            return True  # Fail-safe: treat unreadable as fake
+
+        image = cv2.resize(image, (224, 224))
+        image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0) / 255.0
+
+        with torch.no_grad():
+            output = self.model(image)
+            prob = torch.softmax(output, dim=1)
+            label = torch.argmax(prob).item()
+        return label == 1  # assume 1 = deepfake, 0 = real

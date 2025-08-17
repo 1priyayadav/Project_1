@@ -16,7 +16,7 @@ NO_FACE_DETECTED = "NO_FACE_DETECTED"
 
 
 # -----------------------------
-# Dataset Class (unchanged)
+# Dataset Class
 # -----------------------------
 class Dataset:
     """
@@ -27,7 +27,7 @@ class Dataset:
         self.config = {**config}
         self.path: Path = Path(self.config.pop("path")).absolute()
         self.options: Dict[str, Any] = config["options"]
-        self.storage: Callable[[Path], Path] = Path  # Default to Path to avoid mistakes
+        self.storage: Callable[[Path], Path] = Path  # Default to Path
 
     def __str__(self):
         return f"<Dataset: {self.path.name}>"
@@ -117,7 +117,7 @@ def chop_microseconds(delta: datetime.timedelta) -> datetime.timedelta:
 def encode_faces(
     files: list[str], options=None, pre_encodings=None, progress=None
 ) -> tuple[dict[str, Union[str, list[float]]], int, int]:
-
+    """Generate embeddings for images using DeepFace."""
     if not callable(progress):
         progress = lambda *a: True
 
@@ -136,18 +136,15 @@ def encode_faces(
                 raise ValueError("More than one face detected")
             results[file] = result[0]["embedding"]
             added += 1
-        except TypeError as e:
-            results[file] = str(e)
-        except ValueError:
+        except (TypeError, ValueError):
             results[file] = NO_FACE_DETECTED
     return results, added, existing
 
 
 def get_chunks(elements: list[Any], max_len=multiprocessing.cpu_count()) -> list[list[Any]]:
     processes = min(len(elements), max_len)
-    chunk_size = len(elements) // processes
-    chunks = [elements[i : i + chunk_size] for i in range(0, len(elements), chunk_size)]
-    return chunks
+    chunk_size = max(1, len(elements) // processes)
+    return [elements[i : i + chunk_size] for i in range(0, len(elements), chunk_size)]
 
 
 def dedupe_images(
@@ -157,11 +154,13 @@ def dedupe_images(
     pre_findings: Optional[Dict[str, Any]] = None,
     progress: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, List[Union[str, float]]]:
+    """Compare embeddings and find duplicates using DeepFace.verify."""
     if not callable(progress):
         progress = lambda *a: None
     findings: defaultdict = defaultdict(list)
     if pre_findings:
         findings.update(pre_findings)
+
     for n, file1 in enumerate(files):
         progress(n, file1)
         enc1 = encodings[file1]
@@ -169,13 +168,9 @@ def dedupe_images(
             findings[file1].append([NO_FACE_DETECTED, 99])
             continue
         for file2, enc2 in encodings.items():
-            if file1 == file2:
+            if file1 == file2 or enc2 == NO_FACE_DETECTED:
                 continue
             if file2 in [x[0] for x in findings.get(file1, [])]:
-                continue
-            if file2 in findings:
-                continue
-            if enc2 == NO_FACE_DETECTED:
                 continue
             res = DeepFace.verify(enc1, enc2, **(options or {}))
             findings[file1].append([file2, res["distance"]])
@@ -189,6 +184,7 @@ def generate_report(
     report_file: Path,
     save_to_file: bool = True,
 ) -> None:
+    """Generate HTML report of duplicate findings."""
     def _resolve(p: Union[Path, str]) -> Union[Path, str]:
         if p == NO_FACE_DETECTED:
             return NO_FACE_DETECTED
@@ -209,7 +205,7 @@ def generate_report(
         print(f"Report successfully saved to {report_file}")
 
 
-def distance_to_similarity(distance):
+def distance_to_similarity(distance: float) -> float:
     return 1 - distance
 
 
@@ -221,17 +217,18 @@ def check_liveness(image_path: str, model_path: str = "resources/anti_spoof_mode
     Perform liveness check using Silent-Face Anti-Spoofing.
     Returns True if the face is real/live, False if spoofed.
     """
-    from silent_face import AntiSpoofPredict
-
-    model = AntiSpoofPredict(model_path)
-    image = cv2.imread(image_path)
-    if image is None:
+    try:
+        from silent_face import AntiSpoofPredict
+        model = AntiSpoofPredict(model_path)
+        image = cv2.imread(image_path)
+        if image is None:
+            return False
+        prediction = model.predict(image)
+        label = int(np.argmax(prediction))
+        return label == 1  # 1 = live, 0 = spoof
+    except Exception as e:
+        print(f"[WARN] Liveness check failed: {e}")
         return False
-
-    # Run prediction
-    prediction = model.predict(image)
-    label = np.argmax(prediction)
-    return label == 1  # 1 = real, 0 = spoof
 
 
 # -----------------------------
@@ -239,23 +236,30 @@ def check_liveness(image_path: str, model_path: str = "resources/anti_spoof_mode
 # -----------------------------
 class DeepFakeDetector(torch.nn.Module):
     """
-    A simple pretrained CNN model for deepfake detection.
+    Pretrained CNN model for deepfake detection.
     Replace with a stronger model if needed.
     """
 
     def __init__(self, model_path="resources/deepfake_detector.pth"):
         super().__init__()
-        self.model = torch.load(model_path, map_location="cpu")
-        self.model.eval()
+        try:
+            self.model = torch.load(model_path, map_location="cpu")
+            self.model.eval()
+        except Exception as e:
+            print(f"[WARN] Could not load deepfake model: {e}")
+            self.model = None
 
     def predict(self, image_path: str) -> bool:
         """
         Predict if the image is deepfake.
         Returns True if fake, False if real.
         """
+        if self.model is None:
+            return True  # Fail-safe: treat as fake
+
         image = cv2.imread(image_path)
         if image is None:
-            return True  # Fail-safe: treat unreadable as fake
+            return True
 
         image = cv2.resize(image, (224, 224))
         image = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0) / 255.0
